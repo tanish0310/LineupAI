@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: fpl_optimizer
+      POSTGRES_USER: fpl_user
+      POSTGRES_PASSWORD: fpl_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fpl_user -d fpl_optimizer"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  fpl-optimizer:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://fpl_user:fpl_password@postgres:5432/fpl_optimizer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./data/cache:/app/data/cache
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+
+volumes:
+  postgres_data:
