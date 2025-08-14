@@ -1,6 +1,7 @@
 import requests
 import pandas as pd
 import time
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
@@ -287,12 +288,13 @@ class FPLDataCollector:
             players_df.to_sql('players', self.engine, if_exists='replace', index=False)
             
             # Store teams
-            teams_df = pd.DataFrame(teams_data) if isinstance(teams_data, list) else teams_df
+            teams_df = pd.DataFrame(teams_df) if isinstance(teams_df, list) else teams_df
             teams_df.to_sql('teams', self.engine, if_exists='replace', index=False)
-            
+
             # Store gameweeks
-            gameweeks_df = pd.DataFrame(gameweeks_data) if isinstance(gameweeks_data, list) else gameweeks_df
+            gameweeks_df = pd.DataFrame(gameweeks_df) if isinstance(gameweeks_df, list) else gameweeks_df
             gameweeks_df.to_sql('gameweeks', self.engine, if_exists='replace', index=False)
+
             
             # Store positions
             positions_df = pd.DataFrame(positions_data)
@@ -332,9 +334,41 @@ class FPLDataCollector:
         """Process and enhance teams data."""
         return teams_raw
     
-    def _process_gameweeks_data(self, gameweeks_raw: List[Dict]) -> List[Dict]:
+    def _process_gameweeks_data(self, gameweeks_raw: List[Dict]) -> pd.DataFrame:
         """Process and enhance gameweeks data."""
-        return gameweeks_raw
+        gameweeks_df = pd.DataFrame(gameweeks_raw)
+    
+        # Convert datetime columns
+        gameweeks_df['deadline_time'] = pd.to_datetime(gameweeks_df['deadline_time'])
+        if 'release_time' in gameweeks_df.columns:
+            gameweeks_df['release_time'] = pd.to_datetime(gameweeks_df['release_time'])
+    
+        # Handle complex data structures that can't be stored directly in SQL
+    
+        # Convert lists to JSON strings
+        if 'chip_plays' in gameweeks_df.columns:
+            gameweeks_df['chip_plays'] = gameweeks_df['chip_plays'].apply(
+                lambda x: json.dumps(x) if x is not None else None
+            )
+    
+        # Convert nested dictionaries to JSON strings
+        if 'overrides' in gameweeks_df.columns:
+            gameweeks_df['overrides'] = gameweeks_df['overrides'].apply(
+                lambda x: json.dumps(x) if x is not None else None
+            )
+    
+        # Handle any other complex fields that might exist
+        for col in gameweeks_df.columns:
+            if gameweeks_df[col].dtype == 'object':
+                # Check if column contains dictionaries or lists
+                sample_val = gameweeks_df[col].dropna().iloc[0] if not gameweeks_df[col].dropna().empty else None
+                if isinstance(sample_val, (dict, list)):
+                    gameweeks_df[col] = gameweeks_df[col].apply(
+                        lambda x: json.dumps(x) if x is not None else None
+                    )
+    
+        return gameweeks_df
+
     
     def get_current_gameweek(self) -> int:
         """Get the current active gameweek."""

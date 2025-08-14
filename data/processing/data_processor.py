@@ -27,8 +27,22 @@ class DataProcessor:
         """
         try:
             logger.info("Calculating form metrics for all players...")
+        
+            # Check if gameweek_stats table exists
+            try:
+                check_query = "SELECT COUNT(*) as count FROM gameweek_stats"
+                count_result = pd.read_sql(check_query, self.engine)
             
-            # Get gameweek stats for recent gameweeks
+                if count_result['count'].iloc[0] == 0:
+                    logger.warning("No gameweek stats found - returning empty DataFrame for bootstrap phase")
+                    return pd.DataFrame(columns=['player_id'])
+                
+            except Exception as table_error:
+                # Table doesn't exist yet - this is normal during bootstrap phase
+                logger.warning("gameweek_stats table doesn't exist yet - returning empty DataFrame for bootstrap phase")
+                return pd.DataFrame(columns=['player_id'])
+        
+            # Rest of your existing code for when the table exists and has data...
             query = f"""
             SELECT 
                 gs.*,
@@ -47,36 +61,38 @@ class DataProcessor:
             )
             ORDER BY gs.player_id, gs.gameweek_id
             """
-            
+        
             stats_df = pd.read_sql(query, self.engine)
-            
+        
             if stats_df.empty:
                 logger.warning("No gameweek stats found for form calculation")
-                return pd.DataFrame()
-            
+                return pd.DataFrame(columns=['player_id'])
+        
             # Calculate form metrics for each player
             form_metrics = []
-            
+        
             for player_id in stats_df['player_id'].unique():
                 player_stats = stats_df[stats_df['player_id'] == player_id].copy()
                 player_stats = player_stats.sort_values('gameweek_id')
-                
+            
                 # Calculate various rolling metrics
                 metrics = self._calculate_player_form_metrics(player_stats)
                 metrics['player_id'] = player_id
                 form_metrics.append(metrics)
-            
+        
             form_df = pd.DataFrame(form_metrics)
-            
+        
             # Store updated form metrics back to players table
             self._update_player_form_metrics(form_df)
-            
+        
             logger.info(f"Successfully calculated form metrics for {len(form_df)} players")
             return form_df
-            
+        
         except Exception as e:
             logger.error(f"Error calculating form metrics: {e}")
-            raise
+            # Return empty DataFrame to allow processing to continue
+            return pd.DataFrame(columns=['player_id'])
+
     
     def _calculate_player_form_metrics(self, player_stats: pd.DataFrame) -> Dict:
         """Calculate comprehensive form metrics for a single player."""
@@ -175,24 +191,28 @@ class DataProcessor:
     def _update_player_form_metrics(self, form_df: pd.DataFrame):
         """Update players table with calculated form metrics."""
         try:
-            for _, row in form_df.iterrows():
-                update_query = """
-                UPDATE players 
-                SET 
-                    points_per_game = :ppg,
-                    form = :form,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = :player_id
-                """
+            with self.engine.connect() as conn:
+                for _, row in form_df.iterrows():
+                    update_query = """
+                    UPDATE players 
+                    SET 
+                        points_per_game = :ppg,
+                        form = :form,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :player_id
+                    """
                 
-                self.engine.execute(text(update_query), {
-                    'ppg': row.get('avg_points_per_game', 0),
-                    'form': row.get('weighted_form_3gw', row.get('avg_points_per_game', 0)),
-                    'player_id': row['player_id']
-                })
+                    conn.execute(text(update_query), {
+                        'ppg': row.get('avg_points_per_game', 0),
+                        'form': row.get('weighted_form_3gw', row.get('avg_points_per_game', 0)),
+                        'player_id': row['player_id']
+                    })
             
+                conn.commit()  # Commit the transaction
+        
         except Exception as e:
             logger.error(f"Error updating player form metrics: {e}")
+
     
     def generate_fixture_features(self, gameweek_id: int) -> pd.DataFrame:
         """
@@ -201,8 +221,22 @@ class DataProcessor:
         """
         try:
             logger.info(f"Generating fixture features for gameweek {gameweek_id}...")
+        
+            # Check if fixtures table exists and has data
+            try:
+                check_query = "SELECT COUNT(*) as count FROM fixtures WHERE gameweek_id = %s"
+                count_result = pd.read_sql(check_query, self.engine, params=[gameweek_id])
             
-            # Get fixtures for the gameweek
+                if count_result['count'].iloc[0] == 0:
+                    logger.warning(f"No fixtures found for gameweek {gameweek_id} - returning empty DataFrame for bootstrap phase")
+                    return pd.DataFrame(columns=['player_id'])
+                
+            except Exception as table_error:
+                # Table doesn't exist yet - this is normal during bootstrap phase
+                logger.warning(f"fixtures table doesn't exist yet - returning empty DataFrame for bootstrap phase")
+                return pd.DataFrame(columns=['player_id'])
+        
+            # Rest of your existing code for when the table exists and has data...
             query = """
             SELECT 
                 f.*,
@@ -215,30 +249,32 @@ class DataProcessor:
             FROM fixtures f
             JOIN teams th ON f.team_h = th.id
             JOIN teams ta ON f.team_a = ta.id
-            WHERE f.gameweek_id = :gw_id
+            WHERE f.gameweek_id = %s
             """
-            
-            fixtures_df = pd.read_sql(query, self.engine, params={'gw_id': gameweek_id})
-            
+        
+            fixtures_df = pd.read_sql(query, self.engine, params=[gameweek_id])
+        
             if fixtures_df.empty:
                 logger.warning(f"No fixtures found for gameweek {gameweek_id}")
-                return pd.DataFrame()
-            
+                return pd.DataFrame(columns=['player_id'])
+        
             # Calculate rest days since last fixture
             fixtures_df = self._calculate_rest_days(fixtures_df, gameweek_id)
-            
+        
             # Calculate opponent strength metrics
             fixtures_df = self._calculate_opponent_strength(fixtures_df)
-            
+        
             # Generate player-level fixture features
             player_fixtures = self._generate_player_fixture_features(fixtures_df)
-            
+        
             logger.info(f"Generated fixture features for {len(player_fixtures)} player-fixture combinations")
             return player_fixtures
-            
+        
         except Exception as e:
             logger.error(f"Error generating fixture features: {e}")
-            raise
+            # Return empty DataFrame to allow processing to continue
+            return pd.DataFrame(columns=['player_id'])
+
     
     def _calculate_rest_days(self, fixtures_df: pd.DataFrame, gameweek_id: int) -> pd.DataFrame:
         """Calculate rest days between fixtures for each team."""
@@ -397,29 +433,33 @@ class DataProcessor:
         return pd.DataFrame(player_fixtures)
     
     def create_player_features(self, gameweek_id: int) -> pd.DataFrame:
-        """
-        Create comprehensive feature set for all players for the specified gameweek.
-        Combines historical performance, form, fixture data, and other relevant features.
-        """
+        """Create comprehensive player features - with debugging."""
         try:
             logger.info(f"Creating comprehensive player features for gameweek {gameweek_id}...")
-            
-            # Get base player data
+        
+            # Test each method individually
+            logger.info("Step 1: Getting base features...")
             base_features = self._get_base_player_features()
-            
-            # Get form metrics
+            logger.info(f"✅ Base features successful: {len(base_features)} players")
+        
+            logger.info("Step 2: Getting form features...")
             form_features = self.calculate_form_metrics()
-            
-            # Get fixture features
+            logger.info(f"✅ Form features successful: {len(form_features)} records")
+        
+            logger.info("Step 3: Getting fixture features...")
             fixture_features = self.generate_fixture_features(gameweek_id)
-            
-            # Get price and ownership features
+            logger.info(f"✅ Fixture features successful: {len(fixture_features)} records")
+        
+            logger.info("Step 4: Getting price features...")
             price_features = self._get_price_ownership_features()
-            
-            # Get injury and availability features
+            logger.info(f"✅ Price features successful: {len(price_features)} records")
+        
+            logger.info("Step 5: Getting availability features...")
             availability_features = self._get_availability_features()
-            
-            # Merge all feature sets
+            logger.info(f"✅ Availability features successful: {len(availability_features)} records")
+        
+            # If we get here, the issue is in the merging
+            logger.info("Step 6: Merging features...")
             features = base_features.merge(
                 form_features, on='player_id', how='left'
             ).merge(
@@ -429,50 +469,51 @@ class DataProcessor:
             ).merge(
                 availability_features, on='player_id', how='left'
             )
-            
-            # Fill missing values and create final feature set
+        
+            logger.info("Step 7: Finalizing features...")
             features = self._finalize_features(features, gameweek_id)
-            
-            logger.info(f"Created features for {len(features)} players")
+        
+            logger.info(f"✅ Created features for {len(features)} players")
             return features
-            
+        
         except Exception as e:
-            logger.error(f"Error creating player features: {e}")
+            logger.error(f"❌ Error creating player features: {e}")
             raise
+
     
     def _get_base_player_features(self) -> pd.DataFrame:
         """Get base player information and stats."""
         query = """
         SELECT 
-            p.id as player_id,
-            p.web_name,
-            p.position,
-            p.team,
-            p.now_cost,
-            p.total_points,
-            p.points_per_game,
-            p.form,
-            p.selected_by_percent,
-            p.status,
-            p.goals_scored,
-            p.assists,
-            p.clean_sheets,
-            p.saves,
-            p.bonus,
-            p.bps,
-            p.influence,
-            p.creativity,
-            p.threat,
-            p.ict_index,
-            t.name as team_name,
-            pos.singular_name as position_name
-        FROM players p
-        JOIN teams t ON p.team = t.id
-        JOIN positions pos ON p.position = pos.id
-        WHERE p.status = 'a'
+            id as player_id,
+            web_name,
+            position,
+            team,
+            now_cost,
+            total_points,
+            points_per_game,
+            form,
+            selected_by_percent,
+            status,
+            goals_scored,
+            assists,
+            clean_sheets,
+            saves,
+            bonus,
+            bps,
+            influence,
+            creativity,
+            threat,
+            ict_index
+        FROM players
+        WHERE status = 'a'
         """
-        
+    
         return pd.read_sql(query, self.engine)
+
+
+
+
     
     def _get_price_ownership_features(self) -> pd.DataFrame:
         """Get price change and ownership features."""
@@ -486,7 +527,8 @@ class DataProcessor:
             transfers_in_event,
             transfers_out_event,
             points_per_million,
-            value_score
+            value_score,
+            total_points
         FROM players
         WHERE status = 'a'
         """
@@ -505,32 +547,53 @@ class DataProcessor:
     
     def _get_availability_features(self) -> pd.DataFrame:
         """Get injury and availability features."""
-        query = """
-        SELECT 
-            p.id as player_id,
-            p.chance_of_playing_this_round,
-            p.chance_of_playing_next_round,
-            p.news,
-            COALESCE(tn.injury_status, 'available') as injury_status,
-            COALESCE(tn.confidence_score, 1.0) as availability_confidence
-        FROM players p
-        LEFT JOIN (
-            SELECT DISTINCT ON (player_id) 
-                player_id, injury_status, confidence_score
-            FROM team_news 
-            ORDER BY player_id, created_at DESC
-        ) tn ON p.id = tn.player_id
-        WHERE p.status = 'a'
-        """
+        try:
+            # Try the full query with team_news first
+            query = """
+            SELECT 
+                p.id as player_id,
+                p.chance_of_playing_this_round,
+                p.chance_of_playing_next_round,
+                p.news,
+                COALESCE(tn.injury_status, 'available') as injury_status,
+                COALESCE(tn.confidence_score, 1.0) as availability_confidence
+            FROM players p
+            LEFT JOIN (
+                SELECT DISTINCT ON (player_id) 
+                    player_id, injury_status, confidence_score
+                FROM team_news 
+                ORDER BY player_id, created_at DESC
+            ) tn ON p.id = tn.player_id
+            WHERE p.status = 'a'
+            """
         
-        availability_df = pd.read_sql(query, self.engine)
+            availability_df = pd.read_sql(query, self.engine)
         
+        except Exception as table_error:
+            # team_news table doesn't exist yet - use simplified query
+            logger.warning("team_news table doesn't exist yet - using simplified availability features for bootstrap phase")
+        
+            simple_query = """
+            SELECT 
+                p.id as player_id,
+                p.chance_of_playing_this_round,
+                p.chance_of_playing_next_round,
+                p.news,
+                'available' as injury_status,
+                1.0 as availability_confidence
+            FROM players p
+            WHERE p.status = 'a'
+            """
+        
+            availability_df = pd.read_sql(simple_query, self.engine)
+    
         # Calculate availability score
         availability_df['availability_score'] = availability_df.apply(
             self._calculate_availability_score, axis=1
         )
-        
+    
         return availability_df[['player_id', 'availability_score']]
+
     
     def _calculate_availability_score(self, row) -> float:
         """Calculate comprehensive availability score for a player."""
@@ -558,21 +621,34 @@ class DataProcessor:
     
     def _finalize_features(self, features: pd.DataFrame, gameweek_id: int) -> pd.DataFrame:
         """Finalize feature set with missing value handling and feature engineering."""
-        # Fill missing values
+    
+        # Convert numeric columns to proper data types
+        numeric_columns = [
+            'total_points', 'now_cost', 'form', 'points_per_game', 
+            'selected_by_percent', 'goals_scored', 'assists', 'clean_sheets', 
+            'saves', 'bonus', 'bps', 'influence', 'creativity', 'threat', 'ict_index'
+        ]
+    
+        for col in numeric_columns:
+            if col in features.columns:
+                features[col] = pd.to_numeric(features[col], errors='coerce')
+    
+        # Fill missing values after conversion
         numeric_cols = features.select_dtypes(include=[np.number]).columns
         features[numeric_cols] = features[numeric_cols].fillna(0)
-        
+    
         # Add gameweek identifier
         features['gameweek_id'] = gameweek_id
-        
-        # Create interaction features
+    
+        # Create interaction features - now safe to divide
         features['points_per_cost'] = features['total_points'] / features['now_cost']
         features['form_vs_price'] = features.get('form', 0) / features['now_cost']
-        
+    
         # Position-specific feature adjustments
         features = self._create_position_specific_features(features)
-        
+    
         return features
+
     
     def _create_position_specific_features(self, features: pd.DataFrame) -> pd.DataFrame:
         """Create position-specific features and adjustments."""

@@ -155,13 +155,15 @@ class PlayerPredictor:
             FROM gameweek_stats gs
             JOIN players p ON gs.player_id = p.id
             JOIN gameweeks gw ON gs.gameweek_id = gw.id
-            WHERE p.position = :position_id
+            WHERE p.position = %s
             AND gs.minutes > 0
             AND ({season_filter})
             ORDER BY gs.player_id, gs.gameweek_id
             """
+
+            data = pd.read_sql(query, self.engine, params=[position_id])
+
             
-            data = pd.read_sql(query, self.engine, params={'position_id': position_id})
             
             return data
             
@@ -477,6 +479,56 @@ class PlayerPredictor:
         except Exception as e:
             logger.error(f"Error training {position_name} model: {e}")
             raise
+
+    def train_position_models(self, training_data: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
+        """Train position-specific models using historical data with time series validation."""
+        try:
+            logger.info("Training position-specific models...")
+        
+            results = {}
+        
+            for position_name, data in training_data.items():
+                if data.empty:
+                    logger.warning(f"No training data for {position_name}, skipping...")
+                    continue
+            
+                logger.info(f"Training {position_name} model with {len(data)} samples...")
+            
+                # Check for minimum data requirement
+                if len(data) < 10:
+                    logger.warning(f"Insufficient data for {position_name}: {len(data)} samples. Creating simple model for testing.")
+                    # Create a simple fallback model for testing
+                    from sklearn.linear_model import LinearRegression
+                    self.models[position_name] = LinearRegression()
+                    continue
+            
+                # Prepare features and target
+                feature_columns = [col for col in data.columns if col not in ['target_points', 'player_id', 'gameweek_id']]
+                X = data[feature_columns].copy()
+                y = data['target_points'].copy()
+            
+                # Handle any remaining missing values
+                X = X.fillna(0)
+            
+                # Scale features
+                X_scaled = self.scalers[position_name].fit_transform(X)
+                X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+            
+                # Train with time series cross-validation
+                model_result = self._train_single_position_model(
+                    X_scaled, y, position_name, feature_columns
+                )
+            
+                results[position_name] = model_result
+            
+                logger.info(f"Completed training for {position_name}")
+        
+            return results
+        
+        except Exception as e:
+            logger.error(f"Error training position models: {e}")
+            raise
+
     
     def predict_gameweek_points(self, gameweek_id: int) -> Dict[int, Dict]:
         """
@@ -745,10 +797,11 @@ class PlayerPredictor:
             player_query = """
             SELECT position, web_name, total_points, form
             FROM players 
-            WHERE id = :player_id
+            WHERE id = %s
             """
-            
-            player_data = pd.read_sql(player_query, self.engine, params={'player_id': player_id})
+
+            player_data = pd.read_sql(player_query, self.engine, params=[player_id])
+
             
             if player_data.empty:
                 return {'captain_score': 0, 'reasoning': 'Player not found'}
@@ -808,12 +861,12 @@ class PlayerPredictor:
             query = """
             SELECT total_points
             FROM gameweek_stats
-            WHERE player_id = :player_id
+            WHERE player_id = %s
             AND gameweek_id > (SELECT MAX(id) - 10 FROM gameweeks WHERE finished = TRUE)
             ORDER BY gameweek_id DESC
             """
+            recent_points = pd.read_sql(query, self.engine, params=[player_id])
             
-            recent_points = pd.read_sql(query, self.engine, params={'player_id': player_id})
             
             if len(recent_points) < 3:
                 return 0.5
@@ -846,14 +899,10 @@ class PlayerPredictor:
                 p.team = f.team_h as is_home
             FROM players p
             JOIN fixtures f ON (p.team = f.team_h OR p.team = f.team_a)
-            WHERE p.id = :player_id
-            AND f.gameweek_id = :gameweek_id
+            WHERE p.id = %s
+            AND f.gameweek_id = %s
             """
-            
-            fixture_data = pd.read_sql(query, self.engine, params={
-                'player_id': player_id,
-                'gameweek_id': gameweek_id
-            })
+            fixture_data = pd.read_sql(query, self.engine, params=[player_id, gameweek_id])
             
             if fixture_data.empty:
                 return 0.5
